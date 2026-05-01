@@ -2,8 +2,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from confidence import adjust_confidence
@@ -14,10 +14,19 @@ from planner import create_plan
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
+FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
 
 app = FastAPI(title="Disk Cleanup Chatbot")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.state.chat_state = {
     "messages": [],
     "pending_plan": None,
@@ -94,19 +103,17 @@ def _plan_message(plan):
 
 
 def _result_messages(results):
-    messages = []
-    for result in results:
-        messages.append(
-            {
-                "role": "assistant",
-                "kind": "internal_result",
-                "hidden": True,
-                "action": result["action"],
-                "status": result["status"],
-                "text": result["message"],
-            }
-        )
-    return messages
+    return [
+        {
+            "role": "assistant",
+            "kind": "internal_result",
+            "hidden": True,
+            "action": result["action"],
+            "status": result["status"],
+            "text": result["message"],
+        }
+        for result in results
+    ]
 
 
 def _pending_message(step):
@@ -127,7 +134,7 @@ def _final_summary_message(results, status):
         return {
             "role": "assistant",
             "kind": "text",
-            "text": "I’m not confident enough to act yet. Please be a bit more specific.",
+            "text": "I'm not confident enough to act yet. Please be a bit more specific.",
         }
 
     if status == "awaiting_confirmation":
@@ -135,12 +142,14 @@ def _final_summary_message(results, status):
             "role": "assistant",
             "kind": "text",
             "text": (
-                "I’ve checked the safe steps. Cleaning temp files needs your approval "
+                "I've checked the safe steps. Cleaning temp files needs your approval "
                 "before I continue."
             ),
         }
 
-    visible_results = [result["message"] for result in results if result["status"] == "completed"]
+    visible_results = [
+        result["message"] for result in results if result["status"] == "completed"
+    ]
     if not visible_results:
         return {
             "role": "assistant",
@@ -163,7 +172,9 @@ def _state_payload(state):
 
     return {
         "messages": [
-            message for message in state["messages"] if not message.get("hidden", False)
+            message
+            for message in state["messages"]
+            if not message.get("hidden", False)
         ],
         "pending_confirmation": pending,
         "pending_step": pending_step,
@@ -193,7 +204,9 @@ def _run_plan_into_state(state, plan, start_index=0):
     if execution["status"] == "awaiting_confirmation":
         state["pending_plan"] = plan
         state["pending_index"] = execution["next_index"]
-        state["messages"].append(_pending_message(execution["pending_confirmation"]))
+        state["messages"].append(
+            _pending_message(execution["pending_confirmation"])
+        )
         state["messages"].append(
             _final_summary_message(execution["results"], execution["status"])
         )
@@ -203,12 +216,23 @@ def _run_plan_into_state(state, plan, start_index=0):
     state["pending_index"] = 0
     state["confirmed_actions"] = []
     state["skipped_actions"] = []
-    state["messages"].append(_final_summary_message(execution["results"], execution["status"]))
+    state["messages"].append(
+        _final_summary_message(execution["results"], execution["status"])
+    )
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 def index():
-    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    index_file = FRONTEND_DIST_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return JSONResponse(
+        {
+            "message": (
+                "Frontend not built yet. Run the React app from frontend/ or build it first."
+            )
+        }
+    )
 
 
 @app.get("/api/state")
@@ -304,5 +328,4 @@ def post_reset():
         "confirmed_actions": [],
         "skipped_actions": [],
     }
-    state = app.state.chat_state
-    return JSONResponse(_state_payload(state))
+    return JSONResponse(_state_payload(app.state.chat_state))
